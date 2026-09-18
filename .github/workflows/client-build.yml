@@ -3,7 +3,9 @@
 #
 # 使用前必配（仓库 Settings → Secrets and variables → Actions）：
 #   CLIENT_REPO_URL    （必填）外部仓库地址，如 https://github.com/<org>/<repo>.git
-#   CLIENT_REPO_TOKEN  （必填）对该仓库有读取权限的 PAT 或 fine-grained token
+#   CLIENT_REPO_TOKEN  （必填）对该仓库有读取权限的 PAT / access token
+#   CLIENT_REPO_USER   （可选）HTTPS 克隆用户名。GitHub 留空即可（默认 x-access-token）；
+#                            Codeup/云效 必须填你的 HTTPS 克隆用户名（个人设置 → HTTPS 密码 里查看）
 #   CLIENT_REPO_BRANCH （可选）默认检出的分支/tag，默认 main
 # 手动触发时可填 ref（分支/tag/commit），优先级最高。
 # =============================================================================
@@ -106,17 +108,19 @@ jobs:
         env:
           REPO_URL: ${{ secrets.CLIENT_REPO_URL }}
           REPO_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+          REPO_USER: ${{ secrets.CLIENT_REPO_USER || 'x-access-token' }}
           REF: ${{ env.CLIENT_REF }}
         run: |
           if [[ -z "$REPO_URL" || -z "$REPO_TOKEN" ]]; then
             echo "::error::未配置 CLIENT_REPO_URL / CLIENT_REPO_TOKEN，请到 Settings → Secrets and variables → Actions 添加。"
             exit 1
           fi
-          # 兼容 https:// 前缀或裸域名两种写法，注入 token
+          # 兼容 https:// 前缀或裸域名两种写法，注入 用户名:token
+          # GitHub 默认用 x-access-token；Codeup/云效 需在 CLIENT_REPO_USER 填 HTTPS 克隆用户名
           case "$REPO_URL" in
-            https://*) AUTH_URL="${REPO_URL/https:\/\//https:\/\/x-access-token:${REPO_TOKEN}@}" ;;
-            http://*)  AUTH_URL="${REPO_URL/http:\/\//http:\/\/x-access-token:${REPO_TOKEN}@}" ;;
-            *)         AUTH_URL="https://x-access-token:${REPO_TOKEN}@${REPO_URL}" ;;
+            https://*) AUTH_URL="${REPO_URL/https:\/\//https:\/\/${REPO_USER}:${REPO_TOKEN}@}" ;;
+            http://*)  AUTH_URL="${REPO_URL/http:\/\//http:\/\/${REPO_USER}:${REPO_TOKEN}@}" ;;
+            *)         AUTH_URL="https://${REPO_USER}:${REPO_TOKEN}@${REPO_URL}" ;;
           esac
           if ! git clone --depth 1 --branch "$REF" "$AUTH_URL" . 2>/tmp/clone.err; then
             echo "分支/标签 $REF 不存在，尝试按 commit 检出…"
