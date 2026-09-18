@@ -1,0 +1,278 @@
+# =============================================================================
+# 跨平台编译
+#
+# 使用前必配（仓库 Settings → Secrets and variables → Actions）：
+#   CLIENT_REPO_URL    （必填）外部仓库地址，如 https://github.com/<org>/<repo>.git
+#   CLIENT_REPO_TOKEN  （必填）对该仓库有读取权限的 PAT 或 fine-grained token
+#   CLIENT_REPO_BRANCH （可选）默认检出的分支/tag，默认 main
+# 手动触发时可填 ref（分支/tag/commit），优先级最高。
+# =============================================================================
+
+name: Client Cross-Platform Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要编译的外部仓库分支 / tag / commit（默认 main）'
+        required: false
+        default: 'main'
+  push:
+    branches: ["develop", "main", "releases/**"]
+  pull_request:
+    branches: ["develop", "main"]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 检出的外部仓库 ref：手动输入 > CLIENT_REPO_BRANCH secret > main
+  CLIENT_REF: ${{ inputs.ref || secrets.CLIENT_REPO_BRANCH || 'main' }}
+
+defaults:
+  run:
+    shell: bash # windows 运行器上也使用 bash
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ matrix.OS }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ===== 测试模式：仅编译 Linux x86_64，跑通流程后再取消注释恢复全平台 =====
+          - TARGET: x86_64-unknown-linux-musl
+            OS: ubuntu-24.04
+            ARTIFACT_NAME: linux-x86_64
+          # - TARGET: aarch64-unknown-linux-musl
+          #   OS: ubuntu-24.04-arm
+          #   ARTIFACT_NAME: linux-aarch64
+          # - TARGET: riscv64gc-unknown-linux-musl
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-riscv64
+          # - TARGET: loongarch64-unknown-linux-musl
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-loongarch64
+          # - TARGET: armv7-unknown-linux-musleabihf # 树莓派 2-3-4
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-armv7hf
+          # - TARGET: armv7-unknown-linux-musleabi
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-armv7
+          # - TARGET: arm-unknown-linux-musleabihf # 树莓派 0-1
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-armhf
+          # - TARGET: arm-unknown-linux-musleabi
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-arm
+          # - TARGET: mips-unknown-linux-musl
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-mips
+          # - TARGET: mipsel-unknown-linux-musl
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-mipsel
+          # - TARGET: x86_64-unknown-freebsd
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: freebsd-13.2-x86_64
+          # - TARGET: x86_64-apple-darwin
+          #   OS: macos-latest
+          #   ARTIFACT_NAME: macos-x86_64
+          # - TARGET: aarch64-apple-darwin
+          #   OS: macos-latest
+          #   ARTIFACT_NAME: macos-aarch64
+          # - TARGET: x86_64-pc-windows-msvc
+          #   OS: windows-latest
+          #   ARTIFACT_NAME: windows-x86_64
+          # - TARGET: i686-pc-windows-msvc
+          #   OS: windows-latest
+          #   ARTIFACT_NAME: windows-i686
+          # - TARGET: aarch64-pc-windows-msvc
+          #   OS: windows-11-arm
+          #   ARTIFACT_NAME: windows-arm64
+
+    env:
+      TARGET: ${{ matrix.TARGET }}
+      OS: ${{ matrix.OS }}
+
+    steps:
+      # ---- 检出外部仓库源码（工作区为空白，直接 clone 到当前目录）----
+      - name: Checkout client code from external repository
+        env:
+          REPO_URL: ${{ secrets.CLIENT_REPO_URL }}
+          REPO_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+          REF: ${{ env.CLIENT_REF }}
+        run: |
+          if [[ -z "$REPO_URL" || -z "$REPO_TOKEN" ]]; then
+            echo "::error::未配置 CLIENT_REPO_URL / CLIENT_REPO_TOKEN，请到 Settings → Secrets and variables → Actions 添加。"
+            exit 1
+          fi
+          # 兼容 https:// 前缀或裸域名两种写法，注入 token
+          case "$REPO_URL" in
+            https://*) AUTH_URL="${REPO_URL/https:\/\//https:\/\/x-access-token:${REPO_TOKEN}@}" ;;
+            http://*)  AUTH_URL="${REPO_URL/http:\/\//http:\/\/x-access-token:${REPO_TOKEN}@}" ;;
+            *)         AUTH_URL="https://x-access-token:${REPO_TOKEN}@${REPO_URL}" ;;
+          esac
+          if ! git clone --depth 1 --branch "$REF" "$AUTH_URL" . 2>/tmp/clone.err; then
+            echo "分支/标签 $REF 不存在，尝试按 commit 检出…"
+            git init -q
+            git remote add origin "$AUTH_URL"
+            git fetch --depth 1 origin "$REF"
+            git checkout -q FETCH_HEAD
+          fi
+          git log -1 --oneline
+
+      # ---- 系统依赖（与官方 prepare-build 一致）----
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qqy build-essential mold musl-tools
+
+      # easytier-proto 构建期需要 protoc
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '35.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- Rust 工具链（mips 走 build-std，需要 rust-src）----
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.95
+          target: ${{ !contains(matrix.TARGET, 'mips') && matrix.TARGET || '' }}
+          components: ${{ contains(matrix.TARGET, 'mips') && 'rust-src' || '' }}
+          cache: false
+          rustflags: ''
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ""
+          shared-key: "client-registry"
+          cache-targets: "false"
+
+      # ---- Linux 交叉编译工具链（zig 提供 musl/freebsd 等目标的 C 工具链）----
+      - name: Install zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: true
+
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.23.2
+
+      # ---- MIPS：下载 musl-cross 工具链（与官方一致，20250520 版本）----
+      - name: Install musl cross toolchain (MIPS)
+        if: contains(matrix.TARGET, 'mips')
+        run: |
+          MUSL_TARGET=${{ matrix.TARGET }}sf
+          mkdir -p ./musl_gcc
+          wget --inet4-only -c https://github.com/cross-tools/musl-cross/releases/download/20250520/${MUSL_TARGET}.tar.xz -P ./musl_gcc/
+          tar xf ./musl_gcc/${MUSL_TARGET}.tar.xz -C ./musl_gcc/
+          sudo ln -sf $(pwd)/musl_gcc/${MUSL_TARGET}/bin/*gcc /usr/bin/
+          sudo ln -sf $(pwd)/musl_gcc/${MUSL_TARGET}/include/ /usr/include/musl-cross
+          sudo ln -sf $(pwd)/musl_gcc/${MUSL_TARGET}/${MUSL_TARGET}/sysroot/ ./musl_gcc/sysroot
+          sudo chmod -R a+rwx ./musl_gcc
+          if [[ -d "./musl_gcc/sysroot" ]]; then
+            echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$(readlink -f ./musl_gcc/sysroot)" >> $GITHUB_ENV
+          fi
+          cd "$PWD/musl_gcc/${MUSL_TARGET}/lib/gcc/${MUSL_TARGET}/15.1.0" || exit 255
+          # for panic-abort
+          cp libgcc_eh.a libunwind.a
+          # for mimalloc
+          ar x libgcc.a _ctzsi2.o _clz.o _bswapsi2.o
+          ar rcs libctz.a _ctzsi2.o _clz.o _bswapsi2.o
+
+      # ---- 编译：只构建 client 包 ----
+      - name: Build (client)
+        if: ${{ !contains(matrix.TARGET, 'mips') }}
+        run: |
+          if [[ "$TARGET" =~ (x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|windows|darwin) ]]; then
+            BUILD=build
+          else
+            BUILD=zigbuild
+          fi
+          cargo $BUILD --release --target "$TARGET" --package client
+
+      - name: Build (client, MIPS with build-std)
+        if: ${{ contains(matrix.TARGET, 'mips') }}
+        env:
+          RUSTC_BOOTSTRAP: 1
+        run: |
+          cargo build -r --target "$TARGET" -Z build-std=std,panic_abort --package client
+
+      # ---- 压缩并收集产物（Windows 一并打包 wintun.dll / Packet.dll / *.sys）----
+      - name: Compress binary and collect artifacts
+        run: |
+          mkdir -p ./artifacts
+          SUFFIX=""
+          if [[ "$OS" =~ ^windows.*$ ]]; then
+            SUFFIX=.exe
+            # Windows：打包 easytier 运行期依赖的 wintun.dll / Packet.dll / WinDivert*.sys
+            case "$TARGET" in
+              x86_64*)  ARCH_DIR=x86_64 ;;
+              i686*)    ARCH_DIR=i686 ;;
+              aarch64*) ARCH_DIR=arm64 ;;
+            esac
+            SRC_DIR=""
+            # 优先用源码仓库自带的 third_party（官方布局）
+            if [[ -d "easytier/third_party/${ARCH_DIR}" ]]; then
+              SRC_DIR="easytier/third_party/${ARCH_DIR}"
+            else
+              # 否则从 cargo 缓存的 easytier git 依赖中定位（按 Cargo.lock 锁定的 commit）
+              LOCK_SHA=$(grep 'source = "git+https://github.com/WuYunlong/EasyTier.git' Cargo.lock | head -1 | sed -n 's/.*#\([0-9a-fA-F]\{7,\}\).*/\1/p')
+              if [[ -n "$LOCK_SHA" ]]; then
+                SRC_DIR=$(find "$HOME/.cargo/git/checkouts" -type d -path "*/easytier/third_party/${ARCH_DIR}" 2>/dev/null | grep -i "${LOCK_SHA:0:7}" | head -1)
+              fi
+              if [[ -z "$SRC_DIR" ]]; then
+                SRC_DIR=$(find "$HOME/.cargo/git/checkouts" -type d -path "*/easytier/third_party/${ARCH_DIR}" 2>/dev/null | head -1)
+              fi
+            fi
+            if [[ -n "$SRC_DIR" && -d "$SRC_DIR" ]]; then
+              find "$SRC_DIR" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/ \;
+              echo "已复制 DLL/SYS:"; ls -1 ./artifacts/
+            else
+              echo "::warning::未找到 easytier third_party/${ARCH_DIR}，跳过 DLL/SYS 打包"
+            fi
+          fi
+          if [[ "$OS" =~ ^ubuntu.*$ && ! "$TARGET" =~ (loongarch|freebsd) ]]; then
+            HOST_ARCH=$(uname -m)
+            case "$HOST_ARCH" in
+              x86_64)  UPX_ARCH="amd64" ;;
+              aarch64) UPX_ARCH="arm64" ;;
+              *)       UPX_ARCH="amd64" ;;
+            esac
+            UPX_VERSION=4.2.4
+            UPX_PKG="upx-${UPX_VERSION}-${UPX_ARCH}_linux"
+            curl -L "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/${UPX_PKG}.tar.xz" -s | tar xJvf -
+            cp "${UPX_PKG}/upx" .
+            UPX_BIN=./upx
+          fi
+          BIN="./target/$TARGET/release/client${SUFFIX}"
+          if [[ -f "$BIN" ]]; then
+            if [[ -n "${UPX_BIN:-}" ]]; then
+              "$UPX_BIN" --lzma --best "$BIN" || true
+            fi
+            mv "$BIN" ./artifacts/
+          else
+            echo "::error::未找到 client 产物: $BIN"
+            exit 1
+          fi
+
+      - name: Archive artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: client-${{ matrix.ARTIFACT_NAME }}
+          path: ./artifacts/*
+          if-no-files-found: error
