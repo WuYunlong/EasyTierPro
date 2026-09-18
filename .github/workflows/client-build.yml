@@ -115,18 +115,15 @@ jobs:
             echo "::error::未配置 CLIENT_REPO_URL / CLIENT_REPO_TOKEN，请到 Settings → Secrets and variables → Actions 添加。"
             exit 1
           fi
-          # 兼容 https:// 前缀或裸域名两种写法，注入 用户名:token
-          # GitHub 默认用 x-access-token；Codeup/云效 需在 CLIENT_REPO_USER 填 HTTPS 克隆用户名
-          case "$REPO_URL" in
-            https://*) AUTH_URL="${REPO_URL/https:\/\//https:\/\/${REPO_USER}:${REPO_TOKEN}@}" ;;
-            http://*)  AUTH_URL="${REPO_URL/http:\/\//http:\/\/${REPO_USER}:${REPO_TOKEN}@}" ;;
-            *)         AUTH_URL="https://${REPO_USER}:${REPO_TOKEN}@${REPO_URL}" ;;
-          esac
-          if ! git clone --depth 1 --branch "$REF" "$AUTH_URL" . 2>/tmp/clone.err; then
+          # 用 HTTP Basic Auth header 传递认证，避免用户名/token 含特殊字符（@ : / 等）导致 URL 解析错误
+          AUTH_HEADER=$(printf "%s:%s" "$REPO_USER" "$REPO_TOKEN" | base64 | tr -d '\n')
+          GIT_ARGS=(-c http.extraheader="Authorization: Basic ${AUTH_HEADER}")
+
+          if ! git "${GIT_ARGS[@]}" clone --depth 1 --branch "$REF" "$REPO_URL" . 2>/tmp/clone.err; then
             echo "分支/标签 $REF 不存在，尝试按 commit 检出…"
             git init -q
-            git remote add origin "$AUTH_URL"
-            git fetch --depth 1 origin "$REF"
+            git remote add origin "$REPO_URL"
+            git "${GIT_ARGS[@]}" fetch --depth 1 origin "$REF"
             git checkout -q FETCH_HEAD
           fi
           git log -1 --oneline
