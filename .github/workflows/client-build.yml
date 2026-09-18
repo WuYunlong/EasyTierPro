@@ -265,7 +265,7 @@ jobs:
               SRC_DIR="easytier/third_party/${ARCH_DIR}"
             else
               # 否则从 cargo 缓存的 easytier git 依赖中定位（按 Cargo.lock 锁定的 commit）
-              LOCK_SHA=$(grep 'source = "git+https://github.com/WuYunlong/EasyTier.git' Cargo.lock | head -1 | sed -n 's/.*#\([0-9a-fA-F]\{7,\}\).*/\1/p')
+              LOCK_SHA=$(grep -E 'source = "git\+https://github.com/(WuYunlong/)?EasyTier.git' Cargo.lock | head -1 | sed -n 's/.*#\([0-9a-fA-F]\{7,\}\).*/\1/p')
               if [[ -n "$LOCK_SHA" ]]; then
                 SRC_DIR=$(find "$HOME/.cargo/git/checkouts" -type d -path "*/easytier/third_party/${ARCH_DIR}" 2>/dev/null | grep -i "${LOCK_SHA:0:7}" | head -1)
               fi
@@ -277,7 +277,18 @@ jobs:
               find "$SRC_DIR" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/ \;
               echo "已复制 DLL/SYS:"; ls -1 ./artifacts/
             else
-              echo "::warning::未找到 easytier third_party/${ARCH_DIR}，跳过 DLL/SYS 打包"
+              echo "::warning::本地未找到 easytier third_party/${ARCH_DIR}，改为从官方仓库下载 DLL/SYS..."
+              # 按 Cargo.lock 锁定的 easytier commit 下载，保证驱动与代码版本匹配；无 git 依赖时回退 main
+              [[ -n "$LOCK_SHA" ]] || LOCK_SHA=main
+              BASE="https://raw.githubusercontent.com/EasyTier/EasyTier/${LOCK_SHA}/easytier/third_party/${ARCH_DIR}"
+              case "$ARCH_DIR" in
+                i686) DIVERT_SYS=WinDivert32.sys ;;
+                *)    DIVERT_SYS=WinDivert64.sys ;;
+              esac
+              for F in wintun.dll Packet.dll "$DIVERT_SYS"; do
+                curl -fsSL -o "./artifacts/$F" "$BASE/$F" || echo "::warning::下载 $F 失败（$BASE/$F）"
+              done
+              echo "已下载 DLL/SYS:"; ls -1 ./artifacts/
             fi
           fi
           if [[ "$OS" =~ ^ubuntu.*$ && ! "$TARGET" =~ (loongarch|freebsd) ]]; then
@@ -305,7 +316,7 @@ jobs:
           fi
 
       - name: Archive artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: client-${{ matrix.ARTIFACT_NAME }}
           path: ./artifacts/*
