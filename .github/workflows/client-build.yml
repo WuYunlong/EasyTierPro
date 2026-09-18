@@ -20,10 +20,8 @@ on:
         required: false
         default: 'master'
   push:
-    branches: ["develop", "master", "releases/**"]
-  pull_request:
-    branches: ["develop", "master"]
-    types: [opened, synchronize, reopened, ready_for_review]
+    tags:
+      - '*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -48,10 +46,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ===== 测试模式：仅编译 Linux x86_64，跑通流程后再取消注释恢复全平台 =====
-          - TARGET: x86_64-unknown-linux-musl
-            OS: ubuntu-24.04
-            ARTIFACT_NAME: linux-x86_64
+          # ===== 测试模式：仅编译 Windows x86_64，验证 DLL/SYS 打包是否正确 =====
+          # - TARGET: x86_64-unknown-linux-musl
+          #   OS: ubuntu-24.04
+          #   ARTIFACT_NAME: linux-x86_64
           # - TARGET: aarch64-unknown-linux-musl
           #   OS: ubuntu-24.04-arm
           #   ARTIFACT_NAME: linux-aarch64
@@ -88,9 +86,9 @@ jobs:
           # - TARGET: aarch64-apple-darwin
           #   OS: macos-latest
           #   ARTIFACT_NAME: macos-aarch64
-          # - TARGET: x86_64-pc-windows-msvc
-          #   OS: windows-latest
-          #   ARTIFACT_NAME: windows-x86_64
+          - TARGET: x86_64-pc-windows-msvc
+            OS: windows-latest
+            ARTIFACT_NAME: windows-x86_64
           # - TARGET: i686-pc-windows-msvc
           #   OS: windows-latest
           #   ARTIFACT_NAME: windows-i686
