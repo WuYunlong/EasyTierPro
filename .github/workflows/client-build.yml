@@ -205,29 +205,6 @@ jobs:
           ar x libgcc.a _ctzsi2.o _clz.o _bswapsi2.o
           ar rcs libctz.a _ctzsi2.o _clz.o _bswapsi2.o
 
-      # ---- Windows：确保 third_party 里有编译链接需要的 .lib 文件 ----
-      - name: Ensure Windows third_party .lib files exist
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          case "$TARGET" in
-            x86_64*)  ARCH_DIR=x86_64 ;;
-            i686*)    ARCH_DIR=i686 ;;
-            aarch64*) ARCH_DIR=arm64 ;;
-          esac
-          LIB_DIR="easytier/third_party/${ARCH_DIR}"
-          mkdir -p "$LIB_DIR"
-          # 从官方 EasyTier 仓库下载缺失的 .lib 文件（仓库里可能只放了 .dll/.sys 运行时文件）
-          for LIB in Packet.lib; do
-            if [[ ! -f "${LIB_DIR}/${LIB}" ]]; then
-              echo "下载缺失文件: ${LIB_DIR}/${LIB}"
-              curl -fsSL -o "${LIB_DIR}/${LIB}" \
-                "https://raw.githubusercontent.com/EasyTier/EasyTier/main/easytier/third_party/${ARCH_DIR}/${LIB}"
-            fi
-          done
-          echo "third_party/${ARCH_DIR} 目录内容:"
-          ls -la "$LIB_DIR/"
-
       # ---- 编译：只构建 client 包 ----
       - name: Build (client)
         if: ${{ !contains(matrix.TARGET, 'mips') }}
@@ -253,43 +230,19 @@ jobs:
           SUFFIX=""
           if [[ "$OS" =~ ^windows.*$ ]]; then
             SUFFIX=.exe
-            # Windows：打包 easytier 运行期依赖的 wintun.dll / Packet.dll / WinDivert*.sys
+            # Windows：从固定目录 client/dll/<arch>/ 复制运行期依赖（wintun.dll / Packet.dll / WinDivert*.sys）
             case "$TARGET" in
               x86_64*)  ARCH_DIR=x86_64 ;;
               i686*)    ARCH_DIR=i686 ;;
               aarch64*) ARCH_DIR=arm64 ;;
             esac
-            SRC_DIR=""
-            # 优先用源码仓库自带的 third_party（官方布局）
-            if [[ -d "easytier/third_party/${ARCH_DIR}" ]]; then
-              SRC_DIR="easytier/third_party/${ARCH_DIR}"
-            else
-              # 否则从 cargo 缓存的 easytier git 依赖中定位（按 Cargo.lock 锁定的 commit）
-              LOCK_SHA=$(grep -E 'source = "git\+https://github.com/(WuYunlong/)?EasyTier.git' Cargo.lock | head -1 | sed -n 's/.*#\([0-9a-fA-F]\{7,\}\).*/\1/p')
-              if [[ -n "$LOCK_SHA" ]]; then
-                SRC_DIR=$(find "$HOME/.cargo/git/checkouts" -type d -path "*/easytier/third_party/${ARCH_DIR}" 2>/dev/null | grep -i "${LOCK_SHA:0:7}" | head -1)
-              fi
-              if [[ -z "$SRC_DIR" ]]; then
-                SRC_DIR=$(find "$HOME/.cargo/git/checkouts" -type d -path "*/easytier/third_party/${ARCH_DIR}" 2>/dev/null | head -1)
-              fi
+            DLL_DIR="client/dll/${ARCH_DIR}"
+            if [[ ! -d "$DLL_DIR" ]] || ! find "$DLL_DIR" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) 2>/dev/null | grep -q .; then
+              echo "::error::client/dll/${ARCH_DIR} 下未找到 .dll/.sys，请确认驱动文件已提交（wintun.dll / Packet.dll / WinDivert*.sys）"
+              exit 1
             fi
-            if [[ -n "$SRC_DIR" && -d "$SRC_DIR" ]]; then
-              find "$SRC_DIR" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/ \;
-              echo "已复制 DLL/SYS:"; ls -1 ./artifacts/
-            else
-              echo "::warning::本地未找到 easytier third_party/${ARCH_DIR}，改为从官方仓库下载 DLL/SYS..."
-              # 按 Cargo.lock 锁定的 easytier commit 下载，保证驱动与代码版本匹配；无 git 依赖时回退 main
-              [[ -n "$LOCK_SHA" ]] || LOCK_SHA=main
-              BASE="https://raw.githubusercontent.com/EasyTier/EasyTier/${LOCK_SHA}/easytier/third_party/${ARCH_DIR}"
-              case "$ARCH_DIR" in
-                i686) DIVERT_SYS=WinDivert32.sys ;;
-                *)    DIVERT_SYS=WinDivert64.sys ;;
-              esac
-              for F in wintun.dll Packet.dll "$DIVERT_SYS"; do
-                curl -fsSL -o "./artifacts/$F" "$BASE/$F" || echo "::warning::下载 $F 失败（$BASE/$F）"
-              done
-              echo "已下载 DLL/SYS:"; ls -1 ./artifacts/
-            fi
+            find "$DLL_DIR" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/ \;
+            echo "已复制 DLL/SYS:"; ls -1 ./artifacts/
           fi
           if [[ "$OS" =~ ^ubuntu.*$ && ! "$TARGET" =~ (loongarch|freebsd) ]]; then
             HOST_ARCH=$(uname -m)
