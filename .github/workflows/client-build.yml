@@ -29,8 +29,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # 检出的外部仓库 ref：手动输入 > CLIENT_REPO_BRANCH secret > master
-  CLIENT_REF: ${{ inputs.ref || secrets.CLIENT_REPO_BRANCH || 'master' }}
+  # 检出的外部仓库 ref：手动输入 > push tag 时用 GitHub tag 名 > CLIENT_REPO_BRANCH secret > master
+  CLIENT_REF: ${{ inputs.ref || (github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name) || secrets.CLIENT_REPO_BRANCH || 'master' }}
+  # 是否由 push tag 触发（tag 不存在时直接报错终止）
+  IS_TAG_TRIGGER: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
 
 defaults:
   run:
@@ -108,26 +110,14 @@ jobs:
           REPO_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
           REPO_USER: ${{ secrets.CLIENT_REPO_USER || 'x-access-token' }}
           REF: ${{ env.CLIENT_REF }}
+          IS_TAG_TRIGGER: ${{ env.IS_TAG_TRIGGER }}
         run: |
           if [[ -z "$REPO_URL" || -z "$REPO_TOKEN" ]]; then
             echo "::error::未配置 CLIENT_REPO_URL / CLIENT_REPO_TOKEN，请到 Settings → Secrets and variables → Actions 添加。"
             exit 1
           fi
-          # 自动把 SSH 格式 URL 转成 HTTPS，避免走 SSH 导致 host key 错误
-          case "$REPO_URL" in
-            git@*)
-              HOST_PART="${REPO_URL#git@}"
-              HOST="${HOST_PART%%:*}"
-              PATH_PART="${HOST_PART#*:}"
-              REPO_URL="https://${HOST}/${PATH_PART}"
-              echo "检测到 SSH 地址，已自动转换为 HTTPS"
-              ;;
-            ssh://git@*)
-              REPO_URL="https://${REPO_URL#ssh://git@}"
-              echo "检测到 SSH 地址，已自动转换为 HTTPS"
-              ;;
-          esac
           echo "使用仓库地址: $REPO_URL"
+          echo "检出分支/tag: $REF"
 
           # 用 HTTP Basic Auth header 传递认证，避免用户名/token 含特殊字符（@ : / 等）导致 URL 解析错误
           AUTH_HEADER=$(printf "%s:%s" "$REPO_USER" "$REPO_TOKEN" | base64 | tr -d '\n')
@@ -136,6 +126,10 @@ jobs:
           if ! git "${GIT_ARGS[@]}" clone --depth 1 --branch "$REF" "$REPO_URL" . 2>/tmp/clone.err; then
             echo "::warning::首次 clone 失败，错误输出："
             cat /tmp/clone.err
+            if [[ "$IS_TAG_TRIGGER" == "true" ]]; then
+              echo "::error::push tag 触发，但 Codeup 仓库中不存在 tag '$REF'。请先在 Codeup 创建并推送同名 tag，再到 GitHub 打 tag。终止构建。"
+              exit 1
+            fi
             echo "尝试按 commit 检出…"
             git init -q
             git remote add origin "$REPO_URL"
@@ -210,6 +204,29 @@ jobs:
           # for mimalloc
           ar x libgcc.a _ctzsi2.o _clz.o _bswapsi2.o
           ar rcs libctz.a _ctzsi2.o _clz.o _bswapsi2.o
+
+      # ---- Windows：确保 third_party 里有编译链接需要的 .lib 文件 ----
+      - name: Ensure Windows third_party .lib files exist
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          case "$TARGET" in
+            x86_64*)  ARCH_DIR=x86_64 ;;
+            i686*)    ARCH_DIR=i686 ;;
+            aarch64*) ARCH_DIR=arm64 ;;
+          esac
+          LIB_DIR="easytier/third_party/${ARCH_DIR}"
+          mkdir -p "$LIB_DIR"
+          # 从官方 EasyTier 仓库下载缺失的 .lib 文件（仓库里可能只放了 .dll/.sys 运行时文件）
+          for LIB in Packet.lib; do
+            if [[ ! -f "${LIB_DIR}/${LIB}" ]]; then
+              echo "下载缺失文件: ${LIB_DIR}/${LIB}"
+              curl -fsSL -o "${LIB_DIR}/${LIB}" \
+                "https://raw.githubusercontent.com/EasyTier/EasyTier/main/easytier/third_party/${ARCH_DIR}/${LIB}"
+            fi
+          done
+          echo "third_party/${ARCH_DIR} 目录内容:"
+          ls -la "$LIB_DIR/"
 
       # ---- 编译：只构建 client 包 ----
       - name: Build (client)
