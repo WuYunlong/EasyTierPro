@@ -16,13 +16,13 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: '要编译的外部仓库分支 / tag / commit（默认 main）'
+        description: '要编译的外部仓库分支' # tag commit（默认 master）
         required: false
-        default: 'main'
+        default: 'master'
   push:
-    branches: ["develop", "main", "releases/**"]
+    branches: ["develop", "master", "releases/**"]
   pull_request:
-    branches: ["develop", "main"]
+    branches: ["develop", "master"]
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
@@ -31,8 +31,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # 检出的外部仓库 ref：手动输入 > CLIENT_REPO_BRANCH secret > main
-  CLIENT_REF: ${{ inputs.ref || secrets.CLIENT_REPO_BRANCH || 'main' }}
+  # 检出的外部仓库 ref：手动输入 > CLIENT_REPO_BRANCH secret > master
+  CLIENT_REF: ${{ inputs.ref || secrets.CLIENT_REPO_BRANCH || 'master' }}
 
 defaults:
   run:
@@ -115,12 +115,30 @@ jobs:
             echo "::error::未配置 CLIENT_REPO_URL / CLIENT_REPO_TOKEN，请到 Settings → Secrets and variables → Actions 添加。"
             exit 1
           fi
+          # 自动把 SSH 格式 URL 转成 HTTPS，避免走 SSH 导致 host key 错误
+          case "$REPO_URL" in
+            git@*)
+              HOST_PART="${REPO_URL#git@}"
+              HOST="${HOST_PART%%:*}"
+              PATH_PART="${HOST_PART#*:}"
+              REPO_URL="https://${HOST}/${PATH_PART}"
+              echo "检测到 SSH 地址，已自动转换为 HTTPS"
+              ;;
+            ssh://git@*)
+              REPO_URL="https://${REPO_URL#ssh://git@}"
+              echo "检测到 SSH 地址，已自动转换为 HTTPS"
+              ;;
+          esac
+          echo "使用仓库地址: $REPO_URL"
+
           # 用 HTTP Basic Auth header 传递认证，避免用户名/token 含特殊字符（@ : / 等）导致 URL 解析错误
           AUTH_HEADER=$(printf "%s:%s" "$REPO_USER" "$REPO_TOKEN" | base64 | tr -d '\n')
           GIT_ARGS=(-c http.extraheader="Authorization: Basic ${AUTH_HEADER}")
 
           if ! git "${GIT_ARGS[@]}" clone --depth 1 --branch "$REF" "$REPO_URL" . 2>/tmp/clone.err; then
-            echo "分支/标签 $REF 不存在，尝试按 commit 检出…"
+            echo "::warning::首次 clone 失败，错误输出："
+            cat /tmp/clone.err
+            echo "尝试按 commit 检出…"
             git init -q
             git remote add origin "$REPO_URL"
             git "${GIT_ARGS[@]}" fetch --depth 1 origin "$REF"
