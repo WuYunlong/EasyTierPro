@@ -169,6 +169,17 @@ jobs:
           shared-key: "client-registry"
           cache-targets: "false"
 
+      # ---- Windows：把 Packet.lib 所在目录加入链接库搜索路径 ----
+      - name: 设置 Packet.lib 链接路径
+        if: runner.os == 'Windows'
+        run: |
+          case "$TARGET" in
+            x86_64*)  ARCH_DIR=x86_64 ;;
+            i686*)    ARCH_DIR=i686 ;;
+            aarch64*) ARCH_DIR=arm64 ;;
+          esac
+          echo "LIB=$PWD/client/dll/${ARCH_DIR};$LIB" >> $GITHUB_ENV
+
       # ---- Linux 交叉编译工具链（zig 提供 musl/freebsd 等目标的 C 工具链）----
       - name: 安装 zig
         if: runner.os == 'Linux'
