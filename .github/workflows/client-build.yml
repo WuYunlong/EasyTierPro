@@ -88,15 +88,15 @@ jobs:
           # - TARGET: aarch64-apple-darwin
           #   OS: macos-latest
           #   ARTIFACT_NAME: macos-aarch64
-          # - TARGET: x86_64-pc-windows-msvc
-          #   OS: windows-latest
-          #   ARTIFACT_NAME: windows-x86_64
+          - TARGET: x86_64-pc-windows-msvc
+            OS: windows-latest
+            ARTIFACT_NAME: windows-x86_64
           # - TARGET: i686-pc-windows-msvc
           #   OS: windows-latest
           #   ARTIFACT_NAME: windows-i686
-          - TARGET: aarch64-pc-windows-msvc
-            OS: windows-11-arm
-            ARTIFACT_NAME: windows-arm64
+          # - TARGET: aarch64-pc-windows-msvc
+          #   OS: windows-11-arm
+          #   ARTIFACT_NAME: windows-arm64
 
     env:
       TARGET: ${{ matrix.TARGET }}
@@ -277,6 +277,19 @@ jobs:
             mv "$BIN" ./artifacts/
           else
             echo "::error::未找到 client 产物: $BIN"
+            exit 1
+          fi
+
+      # ---- Windows：验证 exe 已嵌入 requireAdministrator manifest ----
+      # 防止 winres 未生效导致用户双击运行时以普通权限启动，wintun 建网卡失败。
+      # manifest (RT_MANIFEST) 以 UTF-8 XML 存于 PE 资源段，grep -a 直接搜二进制即可。
+      - name: 验证 Windows manifest (requireAdministrator)
+        if: runner.os == 'Windows'
+        run: |
+          if grep -a -q "requireAdministrator" ./artifacts/client.exe; then
+            echo "OK: client.exe 已嵌入 requireAdministrator manifest"
+          else
+            echo "::error::client.exe 中未找到 requireAdministrator，winres manifest 可能未生效，请检查 client/build.rs 与 [target.'cfg(windows)'.build-dependencies]"
             exit 1
           fi
 
